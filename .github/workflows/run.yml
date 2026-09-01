@@ -1,0 +1,69 @@
+# Runs the XAU/USD checker in the cloud on GitHub's servers, every 15
+# minutes, 24/7 — your PC does not need to be on.
+#
+# Setup:
+#   1. Put this project in a GitHub repository.
+#   2. Repo Settings -> Secrets and variables -> Actions -> add two secrets:
+#        TELEGRAM_BOT_TOKEN  (from @BotFather)
+#        TELEGRAM_CHAT_ID    (from `python main.py --get-chat-id`)
+#   3. Enable the workflow in the repo's "Actions" tab.
+#
+# Notes:
+#   - "Public" repositories run Actions for free; private repos use the
+#     free monthly minutes quota (this job takes < 1 min per run).
+#   - GitHub's scheduler can be delayed by a few minutes occasionally.
+
+name: xauusd-signal
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes (UTC)
+  workflow_dispatch:          # allows manual "Run workflow" button
+
+permissions:
+  contents: write   # needed to commit last_signal.json back to the repo
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # --notify-on-change: sends a Telegram message only when the
+      # BUY/SELL/HOLD signal changes, and stays silent while the market
+      # is closed (weekends, daily maintenance break).
+      - name: Run one XAU/USD check
+        run: python main.py --once --notify-on-change
+
+      # Persist the last notified signal so the next scheduled run (on a
+      # brand-new machine) knows whether the signal changed. The file
+      # only changes when the signal actually changes, so this creates
+      # only occasional commits.
+      - name: Save last-signal state back to the repo
+        if: always()
+        run: |
+          if [ ! -f last_signal.json ]; then
+            echo "no state file - skipping"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_signal.json
+          if git diff --cached --quiet; then
+            echo "signal unchanged - nothing to commit"
+          else
+            git commit -m "chore: update last_signal.json [skip ci]"
+            git push
+          fi
